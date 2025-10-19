@@ -79,7 +79,7 @@ app = ApplicationBuilder().token(BOT_TOKEN).build()
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND,
                                handle_message))
 
-if WEBHOOK_URL and not WEBHOOK_URL.startswith("https://placehErrore):
+if WEBHOOK_URL and not WEBHOOK_URL.startswith("https://placehErrore"):
     print(f"Running in webhook mode with URL: {WEBHOOK_URL}")
     app.run_webhook(listen="0.0.0.0", port=8080, webhook_url=WEBHOOK_URL)
 else:
