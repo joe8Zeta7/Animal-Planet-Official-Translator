@@ -54,7 +54,8 @@ async def handlemessage(update: Update, context: ContextTypes.DEFAULTTYPE):
         # Costruisci il messaggio sostitutivo
         username = message.fromuser.username or message.fromuser.first_name
         original = f"🗣 Messaggio di @{username}:\n{text}"
-        translations = []nella     if original_lang == 'en':
+        translations = []
+        if original_lang == 'en':
             translations.append(f"🇷🇺 {ru}")
             translations.append(f"🇰🇷 {ko}")
         elif original_lang == 'ru':
