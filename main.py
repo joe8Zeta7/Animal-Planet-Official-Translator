@@ -4,6 +4,7 @@ from deep_translator import GoogleTranslator
 from flask import Flask
 import threading
 import os
+import re
 
 # Flask app per il ping
 flask_app = Flask(__name__)
@@ -17,32 +18,17 @@ def run_flask():
 
 # Avvia Flask in un thread separato
 threading.Thread(target=run_flask).start()
-
-# Funzione di traduzione
-async def translate(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text
-    translated = GoogleTranslator(source='auto', target='it').translate(text)
-    await update.message.reply_text(translated)
-
-# Funzione di avvio
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Ciao! Mandami un messaggio da tradurre.")
-
-# Avvio del bot
-if __name__ == '__main__':
-    token = os.getenv("BOT_TOKEN")
-    app = ApplicationBuilder().token(token).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, translate))
-    app.run_polling()
     
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 
+def isemojionly(text):
+    emoji_pattern = re.compile(r'^[\U0001F300-\U0001FAFF\U00002700-\U000027BF\U0001F900-\U0001F9FF\U0001F600-\U0001F64F]+$')
+    return bool(emoji_pattern.fullmatch(text.strip()))
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
-    if not text:
+    if not text or isemojionly(text):
         return
 
     try:
