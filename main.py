@@ -26,47 +26,60 @@ def isemojionly(text):
     emoji_pattern = re.compile(r'^[\U0001F300-\U0001FAFF\U00002700-\U000027BF\U0001F900-\U0001F9FF\U0001F600-\U0001F64F]+$')
     return bool(emoji_pattern.fullmatch(text.strip()))
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text
+async def handlemessage(update: Update, context: ContextTypes.DEFAULTTYPE):
+    message = update.message
+    text = message.text
+
     if not text or isemojionly(text):
-        return
+        return  # Ignora emoji o messaggi vuoti
 
     try:
-        # Traduci in inglese
+        # Traduzioni
         en = GoogleTranslator(source='auto', target='en').translate(text)
         ru = GoogleTranslator(source='auto', target='ru').translate(text)
         ko = GoogleTranslator(source='auto', target='ko').translate(text)
 
-        # Se il testo originale è già in inglese
+        # Determina la lingua originale
+        original_lang = None
         if en.strip().lower() == text.strip().lower():
-            ru = GoogleTranslator(source='en', target='ru').translate(text)
-            ko = GoogleTranslator(source='en', target='ko').translate(text)
-            await update.message.reply_text(f"🇷🇺 {ru}\n🇰🇷 {ko}")
+            original_lang = 'en'
+        elif ru.strip().lower() == text.strip().lower():
+            original_lang = 'ru'
+        elif ko.strip().lower() == text.strip().lower():
+            original_lang = 'ko'
+
+        # Cancella il messaggio originale (solo se bot è admin)
+        await context.bot.deletemessage(chatid=message.chatid, messageid=message.message_id)
+
+        # Costruisci il messaggio sostitutivo
+        username = message.fromuser.username or message.fromuser.first_name
+        original = f"🗣 Messaggio di @{username}:\n{text}"
+        translations = []nella     if original_lang == 'en':
+            translations.append(f"🇷🇺 {ru}")
+            translations.append(f"🇰🇷 {ko}")
+        elif original_lang == 'ru':
+            translations.append(f"🇬🇧 {en}")
+            translations.append(f"🇰🇷 {ko}")
+        elif original_lang == 'ko':
+            translations.append(f"🇬🇧 {en}")
+            translations.append(f"🇷🇺 {ru}")
         else:
-            # Se il testo originale è già in russo
-            if ru.strip().lower() == text.strip().lower():
-                en = GoogleTranslator(source='ru', target='en').translate(text)
-                ko = GoogleTranslator(source='ru', target='ko').translate(text)
-                await update.message.reply_text(f"🇬🇧 {en}\n🇰🇷 {ko}")
-            else:
-                # Se il testo originale è già in coreano
-                if ko.strip().lower() == text.strip().lower():
-                    en = GoogleTranslator(source='ko', target='en').translate(text)
-                    ru = GoogleTranslator(source='ko', target='ru').translate(text)
-                    await update.message.reply_text(f"🇬🇧 {en}\n🇷🇺 {ru}")
-                else:
-                    # Se il testo originale è in una lingua diversa
-                    await update.message.reply_text(f"🇬🇧 {en}\n🇷🇺 {ru}\n🇰🇷 {ko}")
+            translations.append(f"🇬🇧 {en}")
+            translations.append(f"🇷🇺 {ru}")
+            translations.append(f"🇰🇷 {ko}")
+
+        # Invia il nuovo messaggio
+        await context.bot.sendmessage(chatid=message.chat_id, text=f"{original}\n\n" + "\n".join(translations))
 
     except Exception as e:
-        await update.message.reply_text(f"Translation error: {str(e)}")
+        await context.bot.sendmessage(chatid=message.chat_id, text=f"⚠️ Error: {str(e)}")
 
 
 app = ApplicationBuilder().token(BOT_TOKEN).build()
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND,
                                handle_message))
 
-if WEBHOOK_URL and not WEBHOOK_URL.startswith("https://placeholder"):
+if WEBHOOK_URL and not WEBHOOK_URL.startswith("https://placehErrore):
     print(f"Running in webhook mode with URL: {WEBHOOK_URL}")
     app.run_webhook(listen="0.0.0.0", port=8080, webhook_url=WEBHOOK_URL)
 else:
