@@ -5,7 +5,7 @@ from flask import Flask
 import threading, os, re
 
 # Flask app per il ping
-flaskapp = Flask(name_)
+flaskapp = Flask(__name__)
 
 @flask_app.route('/')
 def keep_alive():
