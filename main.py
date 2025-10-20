@@ -69,7 +69,7 @@ async def handlemessage(update: Update, context: ContextTypes.DEFAULTTYPE):
         print(f"Error: {e}")
         await context.bot.sendmessage(chatid=message.chat.id, text="⚠️ Translation error.")
 
-Avvio del bot
+# Avvio del bot
 app = ApplicationBuilder().token(BOT_TOKEN).build()
 app.addhandler(MessageHandler(filters.TEXT & ~filters.COMMAND, handlemessage))
 
