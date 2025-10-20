@@ -50,8 +50,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.delete_message(chat_id=message.chat.id, message_id=message.message_id)
 
         # Costruisci il messaggio sostitutivo
-        username = message.from_user.username or message.from_user.first_name
-        original = f"🗣 Messaggio di @{username}:\n{text}"
+        name = message.from_user.full_name
+        original = f"🗣 Messaggio di {name}:\n{text}"
 
         translations = []
         if original_lang == 'en':
