@@ -24,7 +24,7 @@ def isemojionly(text):
     emoji_pattern = re.compile(r'^[\U0001F300-\U0001FAFF\U00002700-\U000027BF\U0001F900-\U0001F9FF\U0001F600-\U0001F64F]+$')
     return bool(emoji_pattern.fullmatch(text.strip()))
 
-async def handlemessage(update: Update, context: ContextTypes.DEFAULTTYPE):
+async def handlemessage(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
     text = message.text
 
