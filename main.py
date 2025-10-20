@@ -51,7 +51,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # Costruisci il messaggio sostitutivo
         name = message.from_user.full_name
-        original = f"🗣 Messaggio di {name}:\n{text}"
+        original = f"🗣 {name}:\n{text}"
 
         translations = []
         if original_lang == 'en':
