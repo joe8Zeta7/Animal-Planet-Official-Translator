@@ -7,7 +7,7 @@ import threading, os, re
 # Flask app per il ping
 flaskapp = Flask(__name__)
 
-@flask_app.route('/')
+@flaskapp.route('/')
 def keep_alive():
     return 'Bot is running', 200
 
