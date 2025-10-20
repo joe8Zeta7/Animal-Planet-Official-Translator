@@ -63,7 +63,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             translations += [f"🇬🇧 {en}", f"🇷🇺 {ru}", f"🇰🇷 {ko}"]
 
-        await context.bot.send_message(chat_id=message.chat.id, text=f"{original}\n\n" + "\n".join(translations))
+        await context.bot.send_message(chat_id=message.chat.id, text=f"{original}\n\n" + "\n\n".join(translations))
 
     except Exception as e:
         print(f"Error: {e}")
