@@ -4,6 +4,7 @@ from deep_translator import GoogleTranslator
 from flask import Flask
 import threading, os, re
 
+# Flask app per il ping
 flask_app = Flask(__name__)
 
 @flask_app.route('/')
@@ -28,26 +29,36 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = message.text
 
     if not text or is_emoji_only(text):
-        return
+        return  # Ignora emoji o messaggi vuoti
 
     try:
+        # Traduzioni
         en = GoogleTranslator(source='auto', target='en').translate(text)
         ru = GoogleTranslator(source='auto', target='ru').translate(text)
         ko = GoogleTranslator(source='auto', target='ko').translate(text)
 
-        lang_detected = GoogleTranslator(source='auto').detect(text)
+        # Rilevamento lingua originale tramite confronto
+        original_lang = None
+        if en.strip().lower() == text.strip().lower():
+            original_lang = 'en'
+        elif ru.strip().lower() == text.strip().lower():
+            original_lang = 'ru'
+        elif ko.strip().lower() == text.strip().lower():
+            original_lang = 'ko'
 
+        # Cancella il messaggio originale (solo se bot è admin)
         await context.bot.delete_message(chat_id=message.chat.id, message_id=message.message_id)
 
+        # Costruisci il messaggio sostitutivo
         username = message.from_user.username or message.from_user.first_name
         original = f"🗣 Messaggio di @{username}:\n{text}"
 
         translations = []
-        if lang_detected == 'en':
+        if original_lang == 'en':
             translations += [f"🇷🇺 {ru}", f"🇰🇷 {ko}"]
-        elif lang_detected == 'ru':
+        elif original_lang == 'ru':
             translations += [f"🇬🇧 {en}", f"🇰🇷 {ko}"]
-        elif lang_detected == 'ko':
+        elif original_lang == 'ko':
             translations += [f"🇬🇧 {en}", f"🇷🇺 {ru}"]
         else:
             translations += [f"🇬🇧 {en}", f"🇷🇺 {ru}", f"🇰🇷 {ko}"]
@@ -56,8 +67,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     except Exception as e:
         print(f"Error: {e}")
-        await context.bot.send_message(chat_id=message.chat.id, text="⚠️ Errore durante la traduzione.")
+        await context.bot.send_message(chat_id=message.chat.id, text="⚠️ Translation error.")
 
+# Avvio del bot
 app = ApplicationBuilder().token(BOT_TOKEN).build()
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
