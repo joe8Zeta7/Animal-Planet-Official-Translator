@@ -4,7 +4,7 @@ from deep_translator import GoogleTranslator
 from flask import Flask
 import threading, os, re
 
-Flask app per il ping
+# Flask app per il ping
 flaskapp = Flask(name_)
 
 @flask_app.route('/')
@@ -14,7 +14,7 @@ def keep_alive():
 def run_flask():
     flask_app.run(host='0.0.0.0', port=10000)
 
-Avvia Flask in un thread separato (daemon=True per chiusura pulita)
+# Avvia Flask in un thread separato (daemon=True per chiusura pulita)
 threading.Thread(target=run_flask, daemon=True).start()
 
 BOTTOKEN = os.getenv("BOTTOKEN")
