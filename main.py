@@ -30,7 +30,7 @@ def is_emoji_only(text):
 # Handler principale
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
-    raw_text = message.parse_entities(types=[MessageEntity.MENTION, MessageEntity.TEXT])
+    raw_text = message.parse_entities(types=[MessageEntity.mention])
     text = ''.join(raw_text.values()).strip() or message.text
 
     if not text or is_emoji_only(text):
