@@ -1,6 +1,7 @@
 import os, re, threading
 from flask import Flask
 from telegram import Update
+from telegram import MessageEntity
 from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
 from deep_translator import GoogleTranslator
 
