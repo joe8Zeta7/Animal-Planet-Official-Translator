@@ -30,8 +30,7 @@ def is_emoji_only(text):
 # Handler principale
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
-    raw_text = message.parse_entities(types=['mention'])
-    text = ''.join(raw_text.values()).strip() or message.text
+    text = message.text
 
     if not text or is_emoji_only(text):
         return
@@ -51,13 +50,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif ko.strip().lower() == text.strip().lower():
             original_lang = 'ko'
 
-        # Cancella il messaggio originale (se bot è admin)
         await context.bot.delete_message(chat_id=message.chat.id, message_id=message.message_id)
 
-        # Costruisci messaggio tradotto
         name = message.from_user.full_name
-        original = f"🗣 {name}:\n{text}"
-
+        header = f"🗣 {name}:\n"
         translations = []
         if original_lang == 'en':
             translations += [f"🇷🇺 {ru}", f"🇰🇷 {ko}"]
@@ -68,7 +64,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             translations += [f"🇬🇧 {en}", f"🇷🇺 {ru}", f"🇰🇷 {ko}"]
 
-        await context.bot.send_message(chat_id=message.chat.id, text=f"{original}\n\n" + "\n\n".join(translations))
+        final_text = header + text + "\n\n" + "\n\n".join(translations)
+
+        # Se ci sono entità (menzioni, link, ecc.), spostane gli offset per il nuovo testo
+        new_entities = []
+        if message.entities:
+            for ent in message.entities:
+                new_ent = ent.to_dict()
+                new_ent['offset'] += len(header)
+                new_entities.append(MessageEntity(**new_ent))
+
+        await context.bot.send_message(
+            chat_id=message.chat.id,
+            text=final_text,
+            entities=new_entities or None
+        )
 
     except Exception as e:
         print(f"Error: {e}")
