@@ -87,8 +87,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.delete_message(chat_id=message.chat.id, message_id=message.message_id)
 
         # Costruisci intestazione (con html.escape per sicurezza)
-        name = html.escape(message.from_user.full_name)
-        header = f"🗣 <b>{name}</b>:
+name = html.escape(message.from_user.full_name)
+
+header = f"🗣 <b>{name}</b>:" + "
 "
 
         # Dizionario delle lingue 
