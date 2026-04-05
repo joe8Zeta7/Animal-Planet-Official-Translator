@@ -83,14 +83,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif nl and nl.strip().lower() == text_lower:
             original_lang = 'nl'
 
-        # Cancella il messaggio originale (se bot è admin)
+        # Creiamo le andate a capo in modo sicuro per evitare bug dell'editor di testo
+        a_capo = chr(10)
+        doppio_a_capo = chr(10) + chr(10)
+
+        # Cancella il messaggio originale
         await context.bot.delete_message(chat_id=message.chat.id, message_id=message.message_id)
 
         # Costruisci intestazione (con html.escape per sicurezza)
-name = html.escape(message.from_user.full_name)
-
-header = f"🗣 <b>{name}</b>:" + "
-"
+        name = html.escape(message.from_user.full_name)
+        header = f"🗣 <b>{name}</b>:{a_capo}"
 
         # Dizionario delle lingue 
         all_langs = {
@@ -105,15 +107,11 @@ header = f"🗣 <b>{name}</b>:" + "
         if original_lang in all_langs:
             del all_langs[original_lang]
 
-        # Crea il blocco testo per le traduzioni
-        translations_text = "
-
-".join(all_langs.values())
+        # Crea il blocco testo per le traduzioni usando il doppio a capo sicuro
+        translations_text = doppio_a_capo.join(all_langs.values())
         
         # Assembliamo il messaggio finale col blocco espandibile HTML
-        final_text = f"{header}{text_html}
-
-<blockquote expandable>{translations_text}</blockquote>"
+        final_text = f"{header}{text_html}{doppio_a_capo}<blockquote expandable>{translations_text}</blockquote>"
 
         # Invia un solo messaggio finale, pulito e compatto!
         await context.bot.send_message(
