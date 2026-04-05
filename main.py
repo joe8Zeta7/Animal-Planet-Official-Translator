@@ -1,4 +1,4 @@
-import os, re, threading, html
+import os, re, threading, html, emoji
 from flask import Flask
 from telegram import Update
 from telegram.constants import ParseMode, MessageEntityType
@@ -26,8 +26,18 @@ WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 def is_emoji_only(text):
     if not text:
         return False
-    emoji_pattern = re.compile(r'^[U0001F300-U0001FAFFU00002700-U000027BFU0001F900-U0001F9FFU0001F600-U0001F64Fs]+$')
-    return bool(emoji_pattern.fullmatch(text.strip()))
+        
+    # Rimuove TUTTE le emoji dal testo originale
+    text_without_emojis = emoji.replace_emoji(text, replace='')
+    
+    # Rimuoviamo anche gli spazi, gli a capo e la punteggiatura di base
+    # (così se un utente manda "😂 !!" viene comunque ignorato)
+    cleaned_text = text_without_emojis.strip(" 
+
+\t.,!?"'")
+    
+    # Se dopo la pulizia non rimane nulla, vuol dire che c'erano solo emoji o punteggiatura
+    return len(cleaned_text) == 0
 
 # Funzione per rilevare se ci sono solo link
 def is_link_only(message) -> bool:
