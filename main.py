@@ -39,9 +39,10 @@ def is_link_only(message) -> bool:
         if ent.type in (MessageEntityType.URL, MessageEntityType.TEXT_LINK)
     )
     
-    # Rimuoviamo gli spazi per il conteggio
-    text_no_spaces = message.text.replace(" ", "").replace("
-", "")
+    # Metodo sicuro: split() divide il testo ignorando tutti gli spazi e gli "a capo", 
+    # join li riunisce senza interruzioni.
+    text_no_spaces = "".join(message.text.split())
+    
     return link_chars >= len(text_no_spaces)
 
 # Handler principale
