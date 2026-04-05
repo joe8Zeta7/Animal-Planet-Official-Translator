@@ -75,6 +75,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         en = GoogleTranslator(source='auto', target='en').translate(raw_text)
         ru = GoogleTranslator(source='auto', target='ru').translate(raw_text)
         de = GoogleTranslator(source='auto', target='de').translate(raw_text)
+        fr = GoogleTranslator(source='auto', target='fr').translate(raw_text)
+        es = GoogleTranslator(source='auto', target='es').translate(raw_text)
         tr = GoogleTranslator(source='auto', target='tr').translate(raw_text)
         nl = GoogleTranslator(source='auto', target='nl').translate(raw_text)
 
@@ -93,6 +95,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             original_lang = 'tr'
         elif nl and nl.strip().lower() == text_lower:
             original_lang = 'nl'
+        elif fr and fr.strip().lower() == text_lower:
+            original_lang = 'fr'
+        elif es and es.strip().lower() == text_lower:
+            original_lang = 'es'
 
         # Creiamo le andate a capo in modo sicuro per evitare bug dell'editor di testo
         a_capo = chr(10)
@@ -111,7 +117,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             'ru': f"🇷🇺 {html.escape(ru)}",
             'de': f"🇩🇪 {html.escape(de)}",
             'tr': f"🇹🇷 {html.escape(tr)}",
-            'nl': f"🇳🇱 {html.escape(nl)}"
+            'nl': f"🇳🇱 {html.escape(nl)}",
+            'fr': f"🇫🇷 {html.escape(fr)}",
+            'es': f"🇪🇸 {html.escape(es)}"
         }
 
         # Rimuove la lingua di partenza per non duplicarla
