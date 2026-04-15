@@ -135,6 +135,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Invia un solo messaggio finale, pulito e compatto!
         await context.bot.send_message(
             chat_id=message.chat.id,
+            message_thread_id=message.message_thread_id,
             text=final_text,
             parse_mode=ParseMode.HTML
         )
@@ -142,7 +143,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         print(f"Error: {e}")
         # Rimane il tuo messaggio di sicurezza in caso di crash delle API
-        await context.bot.send_message(chat_id=message.chat.id, text="⚠️ Translation error.")
+        await context.bot.send_message(
+            chat_id=message.chat.id, 
+            message_thread_id=message.message_thread_id,
+            text="⚠️ Translation error."
+        )
 
 # Avvio del bot
 if __name__ == '__main__':
