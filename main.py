@@ -1,162 +1,438 @@
-import os, re, threading, html, emoji, string
+import os
+import html
+import emoji
+import string
+import threading
+import asyncio
+import logging
+import time
+
 from flask import Flask
+
 from telegram import Update
 from telegram.constants import ParseMode, MessageEntityType
-from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
-from deep_translator import GoogleTranslator
+from telegram.error import Conflict
 
-# Flask app per UptimeRobot
+from telegram.ext import (
+    ApplicationBuilder,
+    MessageHandler,
+    filters,
+    ContextTypes,
+)
+
+from deep_translator import GoogleTranslator
+from deep_translator.exceptions import TooManyRequests
+
+
+# --------------------------------------------------
+# CONFIGURAZIONE
+# --------------------------------------------------
+
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+PORT = int(os.getenv("PORT", "10000"))
+
+# Pausa tra le richieste di traduzione.
+REQUEST_DELAY = 2.0
+
+# Pausa dopo un blocco di Google.
+GOOGLE_COOLDOWN = 120.0
+
+# Ordine delle richieste di traduzione.
+LANGUAGES = ("en", "ru", "de", "fr", "es", "tr", "nl")
+
+# Ordine delle traduzioni nel messaggio finale.
+LANGUAGE_FLAGS = {
+    "en": "🇬🇧",
+    "ru": "🇷🇺",
+    "de": "🇩🇪",
+    "tr": "🇹🇷",
+    "nl": "🇳🇱",
+    "fr": "🇫🇷",
+    "es": "🇪🇸",
+}
+
+NEWLINE = chr(10)
+DOUBLE_NEWLINE = NEWLINE * 2
+
+
+# --------------------------------------------------
+# LOG
+# --------------------------------------------------
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
+
+logger = logging.getLogger(__name__)
+
+# Evita di registrare ogni richiesta HTTP nei log.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+
+
+# --------------------------------------------------
+# FLASK PER UPTIMEROBOT
+# --------------------------------------------------
+
 flask_app = Flask(__name__)
 
-@flask_app.route('/')
+
+@flask_app.route("/", methods=["GET", "HEAD"])
 def keep_alive():
-    return 'Bot is running', 200
+    return "Bot is running", 200
+
 
 def run_flask():
-    flask_app.run(host='0.0.0.0', port=10000)
+    flask_app.run(
+        host="0.0.0.0",
+        port=PORT,
+        debug=False,
+        use_reloader=False,
+    )
 
-# Avvia Flask in un thread separato
-threading.Thread(target=run_flask, daemon=True).start()
 
-# Variabili ambiente
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")
+# --------------------------------------------------
+# CONTROLLO DELLE RICHIESTE DI TRADUZIONE
+# --------------------------------------------------
 
-# Funzione per rilevare solo emoji
+translation_lock = asyncio.Lock()
+google_blocked_until = 0.0
+
+
+async def translate_all(text):
+    global google_blocked_until
+
+    async with translation_lock:
+        remaining = google_blocked_until - time.monotonic()
+
+        if remaining > 0:
+            raise TooManyRequests(
+                f"Google è in pausa: restano circa "
+                f"{int(remaining) + 1} secondi."
+            )
+
+        translations = {}
+
+        for language in LANGUAGES:
+            try:
+                translator = GoogleTranslator(
+                    source="auto",
+                    target=language,
+                )
+
+                translated = await asyncio.to_thread(
+                    translator.translate,
+                    text,
+                )
+
+            except TooManyRequests:
+                google_blocked_until = (
+                    time.monotonic() + GOOGLE_COOLDOWN
+                )
+
+                logger.warning(
+                    "Google ha rifiutato una richiesta. "
+                    "Traduzioni sospese per %.0f secondi.",
+                    GOOGLE_COOLDOWN,
+                )
+
+                raise
+
+            if (
+                not isinstance(translated, str)
+                or not translated.strip()
+            ):
+                raise ValueError(
+                    f"Traduzione vuota per la lingua '{language}'."
+                )
+
+            translations[language] = translated
+
+            await asyncio.sleep(REQUEST_DELAY)
+
+        return translations
+
+
+# --------------------------------------------------
+# FILTRI DEI MESSAGGI
+# --------------------------------------------------
+
 def is_emoji_only(text):
     if not text:
         return False
-        
-    # Rimuove TUTTE le emoji dal testo originale
-    text_without_emojis = emoji.replace_emoji(text, replace='')
-    
-    # Rimuoviamo spazi, andate a capo e punteggiatura usando la libreria 'string'
-    # Questo evita di dover scrivere manualmente i caratteri problematici nel codice
-    cleaned = "".join(
-        char for char in text_without_emojis 
-        if char not in string.whitespace and char not in string.punctuation
+
+    text_without_emojis = emoji.replace_emoji(
+        text,
+        replace="",
     )
-    
-    # Se dopo la pulizia non rimane nessuna lettera o numero, era solo emoji/punteggiatura!
+
+    cleaned = "".join(
+        char
+        for char in text_without_emojis
+        if char not in string.whitespace
+        and char not in string.punctuation
+    )
+
     return len(cleaned) == 0
 
-# Funzione per rilevare se ci sono solo link
-def is_link_only(message) -> bool:
+
+def is_link_only(message):
     if not message.text or not message.entities:
         return False
-    
-    link_chars = sum(
-        ent.length for ent in message.entities 
-        if ent.type in (MessageEntityType.URL, MessageEntityType.TEXT_LINK)
-    )
-    
-    # Metodo sicuro: split() divide il testo ignorando tutti gli spazi e gli "a capo", 
-    # join li riunisce senza interruzioni.
-    text_no_spaces = "".join(message.text.split())
-    
-    return link_chars >= len(text_no_spaces)
 
-# Handler principale
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Gli offset delle entità Telegram usano unità UTF-16.
+    # Rimuoviamo dal testo tutte le parti marcate come link.
+    encoded_text = message.text.encode("utf-16-le")
+
+    link_ranges = sorted(
+        (
+            entity.offset * 2,
+            (entity.offset + entity.length) * 2,
+        )
+        for entity in message.entities
+        if entity.type in (
+            MessageEntityType.URL,
+            MessageEntityType.TEXT_LINK,
+        )
+    )
+
+    if not link_ranges:
+        return False
+
+    remaining_parts = []
+    cursor = 0
+
+    for start, end in link_ranges:
+        if start > cursor:
+            remaining_parts.append(encoded_text[cursor:start])
+
+        cursor = max(cursor, end)
+
+    remaining_parts.append(encoded_text[cursor:])
+
+    remaining_text = b"".join(remaining_parts).decode(
+        "utf-16-le"
+    )
+
+    return not remaining_text.strip()
+
+
+# --------------------------------------------------
+# LINGUA ORIGINALE
+# --------------------------------------------------
+
+def guess_original_language(raw_text, translations):
+    normalized_original = raw_text.strip().casefold()
+
+    # Mantiene il criterio del vecchio codice:
+    # una traduzione identica all'originale suggerisce
+    # che il testo sia già in quella lingua.
+    language_order = (
+        "en",
+        "ru",
+        "de",
+        "tr",
+        "nl",
+        "fr",
+        "es",
+    )
+
+    for language in language_order:
+        translated = translations.get(language)
+
+        if (
+            translated
+            and translated.strip().casefold()
+            == normalized_original
+        ):
+            return language
+
+    # Non presumiamo che il testo sia inglese
+    # se nessuna traduzione coincide con l'originale.
+    return None
+
+
+# --------------------------------------------------
+# HANDLER PRINCIPALE
+# --------------------------------------------------
+
+async def handle_message(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
     message = update.message
+
     if not message:
         return
 
     raw_text = message.text
-    # text_html conserva automaticamente link, grassetti, ecc. scritti dall'utente
-    text_html = message.text_html
 
-    # Ignora se è vuoto, solo emoji, o solo link
-    if not raw_text or is_emoji_only(raw_text) or is_link_only(message):
+    if not raw_text:
+        return
+
+    # Evita di elaborare eventuali messaggi di bot.
+    if message.from_user and message.from_user.is_bot:
+        return
+
+    if is_emoji_only(raw_text) or is_link_only(message):
         return
 
     try:
-        # Traduzioni tramite deep_translator
-        en = GoogleTranslator(source='auto', target='en').translate(raw_text)
-        ru = GoogleTranslator(source='auto', target='ru').translate(raw_text)
-        de = GoogleTranslator(source='auto', target='de').translate(raw_text)
-        fr = GoogleTranslator(source='auto', target='fr').translate(raw_text)
-        es = GoogleTranslator(source='auto', target='es').translate(raw_text)
-        tr = GoogleTranslator(source='auto', target='tr').translate(raw_text)
-        nl = GoogleTranslator(source='auto', target='nl').translate(raw_text)
+        translations = await translate_all(raw_text)
 
-        # Rilevamento lingua originale
-        original_lang = 'en'
-        text_lower = raw_text.strip().lower()
-        
-        # Gestiamo il caso in cui la traduzione ritorni stringhe vuote o None
-        if en and en.strip().lower() == text_lower:
-            original_lang = 'en'
-        elif ru and ru.strip().lower() == text_lower:
-            original_lang = 'ru'
-        elif de and de.strip().lower() == text_lower:
-            original_lang = 'de'
-        elif tr and tr.strip().lower() == text_lower:
-            original_lang = 'tr'
-        elif nl and nl.strip().lower() == text_lower:
-            original_lang = 'nl'
-        elif fr and fr.strip().lower() == text_lower:
-            original_lang = 'fr'
-        elif es and es.strip().lower() == text_lower:
-            original_lang = 'es'
+        original_language = guess_original_language(
+            raw_text,
+            translations,
+        )
 
-        # Creiamo le andate a capo in modo sicuro per evitare bug dell'editor di testo
-        a_capo = chr(10)
-        doppio_a_capo = chr(10) + chr(10)
+        # Conserva la formattazione del messaggio originale.
+        text_html = message.text_html or html.escape(raw_text)
 
-        # Cancella il messaggio originale
-        await context.bot.delete_message(chat_id=message.chat.id, message_id=message.message_id)
+        if message.from_user:
+            author_name = message.from_user.full_name
+        elif message.sender_chat:
+            author_name = message.sender_chat.title or "Utente"
+        else:
+            author_name = "Utente"
 
-        # Costruisci intestazione (con html.escape per sicurezza)
-        name = html.escape(message.from_user.full_name)
-        header = f"🗣 <b>{name}</b>:{a_capo}"
+        name = html.escape(author_name)
 
-        # Dizionario delle lingue 
-        all_langs = {
-            'en': f"🇬🇧 {html.escape(en)}",
-            'ru': f"🇷🇺 {html.escape(ru)}",
-            'de': f"🇩🇪 {html.escape(de)}",
-            'tr': f"🇹🇷 {html.escape(tr)}",
-            'nl': f"🇳🇱 {html.escape(nl)}",
-            'fr': f"🇫🇷 {html.escape(fr)}",
-            'es': f"🇪🇸 {html.escape(es)}"
-        }
+        header = f"🗣 <b>{name}</b>:{NEWLINE}"
 
-        # Rimuove la lingua di partenza per non duplicarla
-        if original_lang in all_langs:
-            del all_langs[original_lang]
+        translation_blocks = []
 
-        # Crea il blocco testo per le traduzioni usando il doppio a capo sicuro
-        translations_text = doppio_a_capo.join(all_langs.values())
-        
-        # Assembliamo il messaggio finale col blocco espandibile HTML
-        final_text = f"{header}{text_html}{doppio_a_capo}<blockquote expandable>{translations_text}</blockquote>"
+        for language, flag in LANGUAGE_FLAGS.items():
+            if language == original_language:
+                continue
 
-        # Invia un solo messaggio finale, pulito e compatto!
+            translated_text = html.escape(
+                translations[language]
+            )
+
+            translation_blocks.append(
+                f"{flag} {translated_text}"
+            )
+
+        translations_text = DOUBLE_NEWLINE.join(
+            translation_blocks
+        )
+
+        final_text = (
+            f"{header}"
+            f"{text_html}"
+            f"{DOUBLE_NEWLINE}"
+            f"<blockquote expandable>"
+            f"{translations_text}"
+            f"</blockquote>"
+        )
+
+        # Prima invia la traduzione.
+        # Se l'invio fallisce, l'originale resta in chat.
         await context.bot.send_message(
             chat_id=message.chat.id,
             message_thread_id=message.message_thread_id,
             text=final_text,
-            parse_mode=ParseMode.HTML
+            parse_mode=ParseMode.HTML,
         )
 
-    except Exception as e:
-        print(f"Error: {e}")
-        # Rimane il tuo messaggio di sicurezza in caso di crash delle API
-        await context.bot.send_message(
-            chat_id=message.chat.id, 
-            message_thread_id=message.message_thread_id,
-            text="⚠️ Translation error."
+        # Cancella l'originale solo dopo l'invio riuscito.
+        try:
+            await context.bot.delete_message(
+                chat_id=message.chat.id,
+                message_id=message.message_id,
+            )
+
+        except Exception:
+            logger.exception(
+                "Traduzione inviata, ma cancellazione "
+                "dell'originale fallita. Chat=%s Messaggio=%s",
+                message.chat.id,
+                message.message_id,
+            )
+
+    except TooManyRequests as error:
+        logger.warning(
+            "Traduzione saltata. Chat=%s Messaggio=%s "
+            "Motivo=%s. Originale conservato.",
+            message.chat.id,
+            message.message_id,
+            error,
         )
 
-# Avvio del bot
-if __name__ == '__main__':
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    except Exception:
+        logger.exception(
+            "Errore nella traduzione o nell'invio. "
+            "Chat=%s Messaggio=%s. Originale conservato.",
+            message.chat.id,
+            message.message_id,
+        )
 
-    if WEBHOOK_URL and WEBHOOK_URL.startswith("https://"):
-        print(f"Running in webhook mode with URL: {WEBHOOK_URL}")
-        app.run_webhook(listen="0.0.0.0", port=8080, webhook_url=WEBHOOK_URL)
-    else:
-        print("Running in polling mode")
-        app.run_polling()
+
+# --------------------------------------------------
+# ERRORI DELL'APPLICAZIONE
+# --------------------------------------------------
+
+async def handle_application_error(
+    update: object,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    error = context.error
+
+    if isinstance(error, Conflict):
+        logger.error(
+            "Conflitto Telegram: un altro processo sta "
+            "eseguendo il polling con lo stesso BOT_TOKEN. "
+            "Controlla eventuali altre istanze del bot "
+            "o la sovrapposizione durante il deploy."
+        )
+        return
+
+    if error is not None:
+        logger.error(
+            "Errore non gestito dell'applicazione",
+            exc_info=(
+                type(error),
+                error,
+                error.__traceback__,
+            ),
+        )
+
+
+# --------------------------------------------------
+# AVVIO
+# --------------------------------------------------
+
+if __name__ == "__main__":
+    if not BOT_TOKEN:
+        raise RuntimeError(
+            "Variabile ambiente BOT_TOKEN mancante."
+        )
+
+    threading.Thread(
+        target=run_flask,
+        daemon=True,
+    ).start()
+
+    app = (
+        ApplicationBuilder()
+        .token(BOT_TOKEN)
+        .concurrent_updates(False)
+        .build()
+    )
+
+    app.add_handler(
+        MessageHandler(
+            filters.TEXT & ~filters.COMMAND,
+            handle_message,
+        )
+    )
+
+    app.add_error_handler(handle_application_error)
+
+    logger.info(
+        "Avvio del bot in polling. "
+        "Server Flask sulla porta %s.",
+        PORT,
+    )
+
+    app.run_polling()
