@@ -31,13 +31,10 @@ from deep_translator.exceptions import TooManyRequests
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 PORT = int(os.getenv("PORT", "10000"))
 
-# Pausa tra le richieste di traduzione.
 REQUEST_DELAY = 2.0
-
-# Pausa dopo un blocco di Google.
 GOOGLE_COOLDOWN = 120.0
 
-# Ordine delle richieste di traduzione.
+# Ordine delle richieste a Google.
 LANGUAGES = ("en", "ru", "de", "fr", "es", "tr", "nl")
 
 # Ordine delle traduzioni nel messaggio finale.
@@ -66,7 +63,6 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
-# Evita di registrare ogni richiesta HTTP nei log.
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
@@ -92,7 +88,7 @@ def run_flask():
 
 
 # --------------------------------------------------
-# CONTROLLO DELLE RICHIESTE DI TRADUZIONE
+# CONTROLLO DELLE TRADUZIONI
 # --------------------------------------------------
 
 translation_lock = asyncio.Lock()
@@ -113,7 +109,16 @@ async def translate_all(text):
 
         translations = {}
 
-        for language in LANGUAGES:
+        for index, language in enumerate(LANGUAGES, start=1):
+            logger.info(
+                "Tentativo di traduzione %s/%s verso: %s",
+                index,
+                len(LANGUAGES),
+                language,
+            )
+
+            started_at = time.monotonic()
+
             try:
                 translator = GoogleTranslator(
                     source="auto",
@@ -131,9 +136,25 @@ async def translate_all(text):
                 )
 
                 logger.warning(
-                    "Google ha rifiutato una richiesta. "
-                    "Traduzioni sospese per %.0f secondi.",
+                    "Google ha bloccato la traduzione verso %s "
+                    "(richiesta %s/%s; traduzioni completate: %s). "
+                    "Pausa di %.0f secondi.",
+                    language,
+                    index,
+                    len(LANGUAGES),
+                    len(translations),
                     GOOGLE_COOLDOWN,
+                )
+
+                raise
+
+            except Exception:
+                logger.exception(
+                    "Errore nella traduzione verso %s "
+                    "(richiesta %s/%s).",
+                    language,
+                    index,
+                    len(LANGUAGES),
                 )
 
                 raise
@@ -147,6 +168,12 @@ async def translate_all(text):
                 )
 
             translations[language] = translated
+
+            logger.info(
+                "Traduzione verso %s completata in %.2f secondi.",
+                language,
+                time.monotonic() - started_at,
+            )
 
             await asyncio.sleep(REQUEST_DELAY)
 
@@ -180,8 +207,6 @@ def is_link_only(message):
     if not message.text or not message.entities:
         return False
 
-    # Gli offset delle entità Telegram usano unità UTF-16.
-    # Rimuoviamo dal testo tutte le parti marcate come link.
     encoded_text = message.text.encode("utf-16-le")
 
     link_ranges = sorted(
@@ -218,15 +243,12 @@ def is_link_only(message):
 
 
 # --------------------------------------------------
-# LINGUA ORIGINALE
+# STIMA DELLA LINGUA ORIGINALE
 # --------------------------------------------------
 
 def guess_original_language(raw_text, translations):
     normalized_original = raw_text.strip().casefold()
 
-    # Mantiene il criterio del vecchio codice:
-    # una traduzione identica all'originale suggerisce
-    # che il testo sia già in quella lingua.
     language_order = (
         "en",
         "ru",
@@ -247,9 +269,28 @@ def guess_original_language(raw_text, translations):
         ):
             return language
 
-    # Non presumiamo che il testo sia inglese
-    # se nessuna traduzione coincide con l'originale.
     return None
+
+
+# --------------------------------------------------
+# AVVISI IN CHAT
+# --------------------------------------------------
+
+async def send_notice(message, context, text):
+    try:
+        await context.bot.send_message(
+            chat_id=message.chat.id,
+            message_thread_id=message.message_thread_id,
+            text=text,
+        )
+
+    except Exception:
+        logger.exception(
+            "Impossibile inviare l'avviso. "
+            "Chat=%s Messaggio=%s",
+            message.chat.id,
+            message.message_id,
+        )
 
 
 # --------------------------------------------------
@@ -270,12 +311,18 @@ async def handle_message(
     if not raw_text:
         return
 
-    # Evita di elaborare eventuali messaggi di bot.
     if message.from_user and message.from_user.is_bot:
         return
 
     if is_emoji_only(raw_text) or is_link_only(message):
         return
+
+    logger.info(
+        "Messaggio ricevuto. Chat=%s Messaggio=%s Caratteri=%s",
+        message.chat.id,
+        message.message_id,
+        len(raw_text),
+    )
 
     try:
         translations = await translate_all(raw_text)
@@ -285,7 +332,6 @@ async def handle_message(
             translations,
         )
 
-        # Conserva la formattazione del messaggio originale.
         text_html = message.text_html or html.escape(raw_text)
 
         if message.from_user:
@@ -326,13 +372,18 @@ async def handle_message(
             f"</blockquote>"
         )
 
-        # Prima invia la traduzione.
-        # Se l'invio fallisce, l'originale resta in chat.
+        # Invia prima il nuovo messaggio.
         await context.bot.send_message(
             chat_id=message.chat.id,
             message_thread_id=message.message_thread_id,
             text=final_text,
             parse_mode=ParseMode.HTML,
+        )
+
+        logger.info(
+            "Messaggio tradotto inviato. Chat=%s Originale=%s",
+            message.chat.id,
+            message.message_id,
         )
 
         # Cancella l'originale solo dopo l'invio riuscito.
@@ -359,12 +410,41 @@ async def handle_message(
             error,
         )
 
+        remaining = max(
+            0,
+            int(google_blocked_until - time.monotonic()) + 1,
+        )
+
+        await send_notice(
+            message,
+            context,
+            (
+                "⚠️ Google sta rifiutando le richieste "
+                "di traduzione. "
+                "Il messaggio originale è stato conservato. "
+                f"Il bot consentirà un nuovo tentativo tra "
+                f"circa {remaining} secondi. "
+                "Questo messaggio non verrà ritradotto "
+                "automaticamente."
+            ),
+        )
+
     except Exception:
         logger.exception(
             "Errore nella traduzione o nell'invio. "
             "Chat=%s Messaggio=%s. Originale conservato.",
             message.chat.id,
             message.message_id,
+        )
+
+        await send_notice(
+            message,
+            context,
+            (
+                "⚠️ Traduzione non riuscita. "
+                "Il messaggio originale è stato conservato. "
+                "I dettagli dell'errore sono nei log."
+            ),
         )
 
 
@@ -385,6 +465,7 @@ async def handle_application_error(
             "Controlla eventuali altre istanze del bot "
             "o la sovrapposizione durante il deploy."
         )
+
         return
 
     if error is not None:
@@ -430,9 +511,10 @@ if __name__ == "__main__":
     app.add_error_handler(handle_application_error)
 
     logger.info(
-        "Avvio del bot in polling. "
-        "Server Flask sulla porta %s.",
+        "Avvio versione diagnostica in polling. "
+        "Flask sulla porta %s. Lingue=%s",
         PORT,
+        ",".join(LANGUAGES),
     )
 
     app.run_polling()
