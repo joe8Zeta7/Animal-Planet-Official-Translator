@@ -35,7 +35,7 @@ PORT = int(os.getenv("PORT", "10000"))
 # d'ambiente LIBRETRANSLATE_URL.
 LIBRETRANSLATE_URL = os.getenv(
     "LIBRETRANSLATE_URL",
-    "https://libretranslate.de",
+    "https://translate.mentality.rip",
 ).rstrip("/")
 
 
