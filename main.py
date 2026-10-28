@@ -32,8 +32,27 @@ PORT = int(os.getenv("PORT", "10000"))
 
 # Istanze LibreTranslate pubbliche.
 # La prima viene usata per prima; le altre sono fallback.
+def clean_url(value):
+
+    value = value.strip()
+
+    # Rimuove eventuale formattazione Markdown tipo
+    # [https://sito](https://sito)
+    if value.startswith("[") and "](" in value:
+
+        value = value[1:]
+        value = value.split("](")[0]
+
+    value = value.strip("[]() \t\r\n")
+
+    if not value.startswith("http://") and not value.startswith("https://"):
+        value = "https://" + value
+
+    return value.rstrip("/")
+
+
 LIBRETRANSLATE_URLS = [
-    url.rstrip("/")
+    clean_url(url)
     for url in os.getenv(
         "LIBRETRANSLATE_URLS",
         "https://translate.mentality.rip,"
@@ -254,18 +273,106 @@ def libretranslate_request(
 # SINGOLA TRADUZIONE CON FALLBACK
 # --------------------------------------------------
 
+# --------------------------------------------------
+# FALLBACK GRATUITO: MYMEMORY
+# --------------------------------------------------
+
+def mymemory_request(
+    text,
+    source,
+    target,
+):
+    """
+    Traduce usando MyMemory, senza API key.
+    """
+
+    if source == "auto":
+        source = "Autodetect"
+
+    params = {
+        "q": text,
+        "langpair": f"{source}|{target}",
+    }
+
+    query = "&".join(
+        f"{key}={request.quote(str(value))}"
+        for key, value in params.items()
+    )
+
+    url = f"https://api.mymemory.translated.net/get?{query}"
+
+    req = request.Request(
+        url,
+        headers={
+            "Accept": "application/json",
+            "User-Agent": (
+                "AnimalPlanetOfficialTranslator/1.0"
+            ),
+        },
+        method="GET",
+    )
+
+    try:
+
+        with request.urlopen(
+            req,
+            timeout=TRANSLATION_TIMEOUT,
+        ) as response:
+
+            result = json.loads(
+                response.read().decode("utf-8")
+            )
+
+    except error.HTTPError as exc:
+
+        raise TranslationRateLimitError(
+            f"MyMemory HTTP {exc.code}"
+        ) from exc
+
+    except error.URLError as exc:
+
+        raise TranslationError(
+            f"MyMemory non raggiungibile: {exc}"
+        ) from exc
+
+    except json.JSONDecodeError as exc:
+
+        raise TranslationError(
+            "MyMemory ha restituito una risposta non valida."
+        ) from exc
+
+    translated = (
+        result.get("responseData", {})
+        .get("translatedText")
+    )
+
+    if (
+        not isinstance(translated, str)
+        or not translated.strip()
+    ):
+
+        raise TranslationError(
+            "MyMemory ha restituito una traduzione vuota."
+        )
+
+    return translated
+
 async def translate_one(
     text,
     source,
     target,
 ):
     """
-    Traduce un testo provando tutte le istanze disponibili.
+    Prova prima LibreTranslate, poi MyMemory.
     """
 
     started_at = time.monotonic()
 
     last_error = None
+
+    # --------------------------------------------------
+    # 1) TENTATIVO LIBRETRANSLATE
+    # --------------------------------------------------
 
     for attempt, base_url in enumerate(
         LIBRETRANSLATE_URLS,
@@ -275,11 +382,8 @@ async def translate_one(
         try:
 
             logger.info(
-                "Traduzione verso %s. "
-                "Tentativo %s/%s su %s.",
+                "Traduzione verso %s tramite LibreTranslate: %s",
                 target,
-                attempt,
-                MAX_TRANSLATION_ATTEMPTS,
                 base_url,
             )
 
@@ -294,25 +398,22 @@ async def translate_one(
             translated = result.get("translatedText")
 
             if (
-                not isinstance(translated, str)
-                or not translated.strip()
+                isinstance(translated, str)
+                and translated.strip()
             ):
 
-                raise TranslationError(
-                    f"Traduzione vuota verso '{target}'."
+                logger.info(
+                    "Traduzione LibreTranslate riuscita. "
+                    "Target=%s Tempo=%.2f secondi.",
+                    target,
+                    time.monotonic() - started_at,
                 )
 
-            elapsed = time.monotonic() - started_at
+                return translated
 
-            logger.info(
-                "Traduzione completata. "
-                "Target=%s Istanza=%s Tempo=%.2f secondi.",
-                target,
-                base_url,
-                elapsed,
+            raise TranslationError(
+                "Traduzione vuota da LibreTranslate."
             )
-
-            return translated
 
         except (
             TranslationError,
@@ -322,21 +423,51 @@ async def translate_one(
             last_error = exc
 
             logger.warning(
-                "Istanza %s fallita per target %s. "
-                "Errore: %s",
+                "LibreTranslate fallita (%s) per %s: %s",
                 base_url,
                 target,
                 exc,
             )
 
-            if attempt < MAX_TRANSLATION_ATTEMPTS:
+            await asyncio.sleep(RETRY_DELAY)
 
-                await asyncio.sleep(RETRY_DELAY)
+    # --------------------------------------------------
+    # 2) FALLBACK MYMEMORY
+    # --------------------------------------------------
+
+    try:
+
+        logger.info(
+            "Passo al fallback MyMemory per %s.",
+            target,
+        )
+
+        translated = await asyncio.to_thread(
+            mymemory_request,
+            text,
+            source,
+            target,
+        )
+
+        logger.info(
+            "Traduzione MyMemory riuscita. "
+            "Target=%s Tempo=%.2f secondi.",
+            target,
+            time.monotonic() - started_at,
+        )
+
+        return translated
+
+    except (
+        TranslationError,
+        TranslationRateLimitError,
+    ) as exc:
+
+        last_error = exc
 
     raise TranslationError(
-        f"Tutte le istanze LibreTranslate hanno fallito "
-        f"per la lingua '{target}'. "
-        f"Ultimo errore: {last_error}"
+        f"Tutti i servizi di traduzione hanno fallito "
+        f"per '{target}'. Ultimo errore: {last_error}"
     )
 
 
