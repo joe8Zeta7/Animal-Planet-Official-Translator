@@ -68,9 +68,6 @@ DOUBLE_NEWLINE = NEWLINE * 2
 TRANSLATION_TIMEOUT = 25
 MAX_PARALLEL_TRANSLATIONS = 3
 
-# Non tradurre messaggi troppo corti.
-MIN_TEXT_LENGTH = 10
-
 # Durata della cache in secondi.
 CACHE_TTL = 60 * 30
 
@@ -681,11 +678,6 @@ def is_link_only(message):
     return not remaining_text.strip()
 
 
-def is_too_short(text):
-
-    return len(text.strip()) < MIN_TEXT_LENGTH
-
-
 # --------------------------------------------------
 # AVVISI
 # --------------------------------------------------
@@ -741,7 +733,6 @@ async def handle_message(
     if (
         is_emoji_only(raw_text)
         or is_link_only(message)
-        or is_too_short(raw_text)
     ):
         return
 
