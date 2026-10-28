@@ -32,28 +32,32 @@ from telegram.ext import (
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 PORT = int(os.getenv("PORT", "10000"))
 
+AZURE_TRANSLATOR_KEY = os.getenv("AZURE_TRANSLATOR_KEY")
+AZURE_TRANSLATOR_REGION = os.getenv("AZURE_TRANSLATOR_REGION")
 
-# Lingue che vogliamo mostrare.
+AZURE_TRANSLATOR_URL = (
+    "https://api.cognitive.microsofttranslator.com"
+    "/translate"
+    "?api-version=3.0"
+)
+
+MYMEMORY_EMAIL = os.getenv("MYMEMORY_EMAIL")
+
+
+# Lingue della gilda.
 LANGUAGES = (
     "en",
     "ru",
     "de",
     "fr",
-    "es",
-    "tr",
-    "nl",
 )
 
 
-# Ordine delle traduzioni nel messaggio finale.
 LANGUAGE_FLAGS = {
     "en": "🇬🇧",
     "ru": "🇷🇺",
     "de": "🇩🇪",
     "tr": "🇹🇷",
-    "nl": "🇳🇱",
-    "fr": "🇫🇷",
-    "es": "🇪🇸",
 }
 
 
@@ -61,11 +65,14 @@ NEWLINE = chr(10)
 DOUBLE_NEWLINE = NEWLINE * 2
 
 
-# Timeout massimo di una singola richiesta HTTP.
-TRANSLATION_TIMEOUT = 20
-
-# Quante traduzioni possono girare contemporaneamente.
+TRANSLATION_TIMEOUT = 25
 MAX_PARALLEL_TRANSLATIONS = 3
+
+# Non tradurre messaggi troppo corti.
+MIN_TEXT_LENGTH = 10
+
+# Durata della cache in secondi.
+CACHE_TTL = 60 * 30
 
 
 # --------------------------------------------------
@@ -83,7 +90,7 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
 # --------------------------------------------------
-# FLASK PER UPTIMEROBOT / RENDER
+# FLASK PER RENDER / UPTIMEROBOT
 # --------------------------------------------------
 
 flask_app = Flask(__name__)
@@ -104,7 +111,7 @@ def run_flask():
 
 
 # --------------------------------------------------
-# CONTROLLO DELLE TRADUZIONI
+# STATO INTERNO
 # --------------------------------------------------
 
 translation_lock = asyncio.Lock()
@@ -113,21 +120,140 @@ translation_semaphore = asyncio.Semaphore(
     MAX_PARALLEL_TRANSLATIONS
 )
 
+# cache[(source, target, text)] = (traduzione, timestamp)
+translation_cache = {}
+
 
 # --------------------------------------------------
-# ECCEZIONI TRADUZIONE
+# ECCEZIONI
 # --------------------------------------------------
 
 class TranslationError(Exception):
-    """Errore generico del servizio di traduzione."""
+    pass
 
 
 class TranslationRateLimitError(TranslationError):
-    """Il servizio di traduzione ha rifiutato la richiesta."""
+    pass
 
 
 # --------------------------------------------------
-# TRADUZIONE CON MYMEMORY
+# AZURE TRANSLATOR
+# --------------------------------------------------
+
+def azure_translate_request(
+    text,
+    source,
+    target,
+):
+    """
+    Traduce un testo con Azure AI Translator.
+    """
+
+    url = f"{AZURE_TRANSLATOR_URL}&to={target}"
+
+    if source and source != "auto":
+        url += f"&from={source}"
+
+    payload = [
+        {
+            "text": text,
+        }
+    ]
+
+    data = json.dumps(payload).encode("utf-8")
+
+    headers = {
+        "Ocp-Apim-Subscription-Key": AZURE_TRANSLATOR_KEY,
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+
+    if AZURE_TRANSLATOR_REGION:
+        headers[
+            "Ocp-Apim-Subscription-Region"
+        ] = AZURE_TRANSLATOR_REGION
+
+    req = request.Request(
+        url,
+        data=data,
+        headers=headers,
+        method="POST",
+    )
+
+    try:
+
+        with request.urlopen(
+            req,
+            timeout=TRANSLATION_TIMEOUT,
+        ) as response:
+
+            result = json.loads(
+                response.read().decode("utf-8")
+            )
+
+    except error.HTTPError as exc:
+
+        try:
+            body = exc.read().decode(
+                "utf-8",
+                errors="replace",
+            )
+        except Exception:
+            body = ""
+
+        if exc.code in (429, 403):
+
+            raise TranslationRateLimitError(
+                f"Azure HTTP {exc.code}. {body}"
+            ) from exc
+
+        raise TranslationError(
+            f"Azure HTTP {exc.code}. {body}"
+        ) from exc
+
+    except error.URLError as exc:
+
+        raise TranslationError(
+            f"Azure non raggiungibile: {exc}"
+        ) from exc
+
+    except TimeoutError as exc:
+
+        raise TranslationError(
+            "Timeout durante la richiesta ad Azure."
+        ) from exc
+
+    except json.JSONDecodeError as exc:
+
+        raise TranslationError(
+            "Azure ha restituito una risposta non valida."
+        ) from exc
+
+    try:
+
+        translated = (
+            result[0]["translations"][0]["text"]
+        )
+
+    except (KeyError, IndexError, TypeError) as exc:
+
+        raise TranslationError(
+            "Azure ha restituito una risposta "
+            "senza traduzione valida."
+        ) from exc
+
+    if not translated.strip():
+
+        raise TranslationError(
+            f"Azure ha restituito una traduzione "
+            f"vuota verso '{target}'."
+        )
+
+    return translated
+
+
+# --------------------------------------------------
+# MYMEMORY FALLBACK
 # --------------------------------------------------
 
 def mymemory_request(
@@ -136,13 +262,16 @@ def mymemory_request(
     target,
 ):
     """
-    Traduce un testo con MyMemory.
+    Fallback gratuito con MyMemory.
     """
 
     params = {
         "q": text,
         "langpair": f"{source}|{target}",
     }
+
+    if MYMEMORY_EMAIL:
+        params["de"] = MYMEMORY_EMAIL
 
     query = "&".join(
         f"{key}={request.quote(str(value))}"
@@ -178,40 +307,20 @@ def mymemory_request(
 
     except error.HTTPError as exc:
 
-        try:
-            body = exc.read().decode(
-                "utf-8",
-                errors="replace",
-            )
-        except Exception:
-            body = ""
-
         if exc.code in (429, 403):
 
             raise TranslationRateLimitError(
-                f"MyMemory HTTP {exc.code}. {body}"
+                f"MyMemory HTTP {exc.code}"
             ) from exc
 
         raise TranslationError(
-            f"MyMemory HTTP {exc.code}. {body}"
+            f"MyMemory HTTP {exc.code}"
         ) from exc
 
     except error.URLError as exc:
 
         raise TranslationError(
             f"MyMemory non raggiungibile: {exc}"
-        ) from exc
-
-    except TimeoutError as exc:
-
-        raise TranslationError(
-            "Timeout durante la richiesta a MyMemory."
-        ) from exc
-
-    except json.JSONDecodeError as exc:
-
-        raise TranslationError(
-            "MyMemory ha restituito una risposta non valida."
         ) from exc
 
     translated = (
@@ -232,27 +341,148 @@ def mymemory_request(
     return translated
 
 
+# --------------------------------------------------
+# CACHE
+# --------------------------------------------------
+
+def get_cached_translation(
+    source,
+    target,
+    text,
+):
+
+    key = (source, target, text)
+
+    cached = translation_cache.get(key)
+
+    if not cached:
+        return None
+
+    translated, created_at = cached
+
+    if time.monotonic() - created_at > CACHE_TTL:
+
+        translation_cache.pop(key, None)
+
+        return None
+
+    return translated
+
+
+def save_cached_translation(
+    source,
+    target,
+    text,
+    translated,
+):
+
+    key = (source, target, text)
+
+    if len(translation_cache) > 1000:
+
+        oldest_key = min(
+            translation_cache,
+            key=lambda k: translation_cache[k][1],
+        )
+
+        translation_cache.pop(oldest_key, None)
+
+    translation_cache[key] = (
+        translated,
+        time.monotonic(),
+    )
+
+
+# --------------------------------------------------
+# TRADUZIONE SINGOLA
+# --------------------------------------------------
+
 async def translate_one(
     text,
     source,
     target,
 ):
     """
-    Traduce un testo verso una lingua con MyMemory.
+    Traduce con Azure; usa MyMemory solo se Azure fallisce.
     """
+
+    if source == target:
+        return text
+
+    cached = get_cached_translation(
+        source,
+        target,
+        text,
+    )
+
+    if cached is not None:
+
+        logger.info(
+            "Traduzione dalla cache. Target=%s",
+            target,
+        )
+
+        return cached
 
     started_at = time.monotonic()
 
-    translated = await asyncio.to_thread(
-        mymemory_request,
-        text,
+    try:
+
+        translated = await asyncio.to_thread(
+            azure_translate_request,
+            text,
+            source,
+            target,
+        )
+
+        service = "Azure"
+
+    except (
+        TranslationError,
+        TranslationRateLimitError,
+    ) as azure_error:
+
+        logger.warning(
+            "Azure fallito per %s: %s. "
+            "Provo MyMemory.",
+            target,
+            azure_error,
+        )
+
+        try:
+
+            translated = await asyncio.to_thread(
+                mymemory_request,
+                text,
+                source,
+                target,
+            )
+
+            service = "MyMemory"
+
+        except (
+            TranslationError,
+            TranslationRateLimitError,
+        ) as mymemory_error:
+
+            raise TranslationError(
+                f"Azure e MyMemory hanno fallito "
+                f"per '{target}'. "
+                f"Azure: {azure_error}. "
+                f"MyMemory: {mymemory_error}"
+            ) from mymemory_error
+
+    save_cached_translation(
         source,
         target,
+        text,
+        translated,
     )
 
     logger.info(
         "Traduzione completata. "
-        "Source=%s Target=%s Tempo=%.2f secondi.",
+        "Servizio=%s Source=%s Target=%s Tempo=%.2f",
+        service,
         source,
         target,
         time.monotonic() - started_at,
@@ -272,7 +502,7 @@ def detect_original_language(text):
         language = detect(text)
 
         logger.info(
-            "Lingua originale rilevata localmente: %s",
+            "Lingua originale rilevata: %s",
             language,
         )
 
@@ -281,8 +511,7 @@ def detect_original_language(text):
     except LangDetectException:
 
         logger.warning(
-            "Impossibile rilevare la lingua originale. "
-            "Uso l’italiano come fallback."
+            "Lingua non rilevata. Uso italiano."
         )
 
         return "it"
@@ -297,7 +526,7 @@ async def translate_all(text):
     async with translation_lock:
 
         logger.info(
-            "Avvio traduzione verso %s lingue con MyMemory.",
+            "Avvio traduzione verso %s lingue con Azure.",
             len(LANGUAGES),
         )
 
@@ -322,11 +551,6 @@ async def translate_all(text):
         async def translate_target(language):
 
             async with translation_semaphore:
-
-                logger.info(
-                    "Avvio traduzione verso: %s",
-                    language,
-                )
 
                 translated = await translate_one(
                     text,
@@ -363,14 +587,9 @@ async def translate_all(text):
                 + ", ".join(missing)
             )
 
-        elapsed = time.monotonic() - started_at
-
         logger.info(
-            "Tutte le traduzioni completate (%s/%s) "
-            "in %.2f secondi.",
-            len(translations),
-            len(LANGUAGES),
-            elapsed,
+            "Tutte le traduzioni completate in %.2f secondi.",
+            time.monotonic() - started_at,
         )
 
         return (
@@ -380,7 +599,7 @@ async def translate_all(text):
 
 
 # --------------------------------------------------
-# FILTRI DEI MESSAGGI
+# FILTRI MESSAGGI
 # --------------------------------------------------
 
 def is_emoji_only(text):
@@ -462,8 +681,13 @@ def is_link_only(message):
     return not remaining_text.strip()
 
 
+def is_too_short(text):
+
+    return len(text.strip()) < MIN_TEXT_LENGTH
+
+
 # --------------------------------------------------
-# AVVISI IN CHAT
+# AVVISI
 # --------------------------------------------------
 
 async def send_notice(
@@ -485,10 +709,7 @@ async def send_notice(
     except Exception:
 
         logger.exception(
-            "Impossibile inviare l’avviso. "
-            "Chat=%s Messaggio=%s",
-            message.chat.id,
-            message.message_id,
+            "Impossibile inviare l’avviso."
         )
 
 
@@ -520,6 +741,7 @@ async def handle_message(
     if (
         is_emoji_only(raw_text)
         or is_link_only(message)
+        or is_too_short(raw_text)
     ):
         return
 
@@ -621,21 +843,13 @@ async def handle_message(
         except Exception:
 
             logger.exception(
-                "Traduzione inviata, ma cancellazione "
-                "dell’originale fallita. "
-                "Chat=%s Messaggio=%s",
-                message.chat.id,
-                message.message_id,
+                "Cancellazione originale fallita."
             )
 
     except TranslationRateLimitError as error:
 
         logger.warning(
-            "Servizio di traduzione sovraccarico o bloccato. "
-            "Chat=%s Messaggio=%s Motivo=%s. "
-            "Originale conservato.",
-            message.chat.id,
-            message.message_id,
+            "Servizio di traduzione limitato. %s",
             error,
         )
 
@@ -644,21 +858,16 @@ async def handle_message(
             context,
             (
                 "⚠️ Il servizio di traduzione "
-                "ha rifiutato temporaneamente "
-                "la richiesta. "
-                "Il messaggio originale è stato "
-                "conservato."
+                "ha raggiunto temporaneamente un limite. "
+                "Il messaggio originale è stato conservato."
             ),
         )
 
     except TranslationError as error:
 
         logger.exception(
-            "Errore di traduzione. "
-            "Chat=%s Messaggio=%s. "
-            "Originale conservato.",
-            message.chat.id,
-            message.message_id,
+            "Errore di traduzione: %s",
+            error,
         )
 
         await send_notice(
@@ -666,20 +875,14 @@ async def handle_message(
             context,
             (
                 "⚠️ Traduzione non riuscita. "
-                "Il messaggio originale è stato "
-                "conservato. "
-                "Dettagli nei log."
+                "Il messaggio originale è stato conservato."
             ),
         )
 
     except Exception:
 
         logger.exception(
-            "Errore nella traduzione o nell’invio. "
-            "Chat=%s Messaggio=%s. "
-            "Originale conservato.",
-            message.chat.id,
-            message.message_id,
+            "Errore generico nella traduzione."
         )
 
         await send_notice(
@@ -687,15 +890,13 @@ async def handle_message(
             context,
             (
                 "⚠️ Traduzione non riuscita. "
-                "Il messaggio originale è stato "
-                "conservato. "
-                "I dettagli dell’errore sono nei log."
+                "Il messaggio originale è stato conservato."
             ),
         )
 
 
 # --------------------------------------------------
-# ERRORI DELL’APPLICAZIONE
+# ERRORI APPLICAZIONE
 # --------------------------------------------------
 
 async def handle_application_error(
@@ -709,8 +910,7 @@ async def handle_application_error(
 
         logger.error(
             "CONFLITTO TELEGRAM: un altro processo "
-            "sta eseguendo il polling con lo stesso "
-            "BOT_TOKEN."
+            "usa lo stesso BOT_TOKEN."
         )
 
         return
@@ -718,7 +918,7 @@ async def handle_application_error(
     if error is not None:
 
         logger.error(
-            "Errore non gestito dell’applicazione",
+            "Errore non gestito.",
             exc_info=(
                 type(error),
                 error,
@@ -736,7 +936,19 @@ if __name__ == "__main__":
     if not BOT_TOKEN:
 
         raise RuntimeError(
-            "Variabile ambiente BOT_TOKEN mancante."
+            "Variabile BOT_TOKEN mancante."
+        )
+
+    if not AZURE_TRANSLATOR_KEY:
+
+        raise RuntimeError(
+            "Variabile AZURE_TRANSLATOR_KEY mancante."
+        )
+
+    if not AZURE_TRANSLATOR_REGION:
+
+        raise RuntimeError(
+            "Variabile AZURE_TRANSLATOR_REGION mancante."
         )
 
     threading.Thread(
@@ -763,11 +975,11 @@ if __name__ == "__main__":
     )
 
     logger.info(
-        "Avvio bot in polling. "
-        "Flask sulla porta %s. "
-        "Lingue=%s. "
-        "Servizio=MyMemory",
-        PORT,
+        "Avvio bot. "
+        "Servizio=Azure Translator. "
+        "Regione=%s. "
+        "Lingue=%s",
+        AZURE_TRANSLATOR_REGION,
         ",".join(LANGUAGES),
     )
 
@@ -782,14 +994,14 @@ if __name__ == "__main__":
             )
 
             logger.info(
-                "TEST MYMEMORY RIUSCITO. Risultato=%r",
+                "TEST AZURE RIUSCITO. Risultato=%r",
                 translated,
             )
 
         except Exception:
 
             logger.exception(
-                "TEST MYMEMORY FALLITO."
+                "TEST AZURE FALLITO."
             )
 
     app.post_init = post_init
