@@ -15,6 +15,8 @@ from telegram import Update
 from telegram.constants import ParseMode, MessageEntityType
 from telegram.error import Conflict
 
+from langdetect import detect, LangDetectException
+
 from telegram.ext import (
     ApplicationBuilder,
     MessageHandler,
@@ -29,38 +31,6 @@ from telegram.ext import (
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 PORT = int(os.getenv("PORT", "10000"))
-
-# Istanze LibreTranslate pubbliche.
-# La prima viene usata per prima; le altre sono fallback.
-def clean_url(value):
-
-    value = value.strip()
-
-    # Rimuove eventuale formattazione Markdown tipo
-    # [https://sito](https://sito)
-    if value.startswith("[") and "](" in value:
-
-        value = value[1:]
-        value = value.split("](")[0]
-
-    value = value.strip("[]() \t\r\n")
-
-    if not value.startswith("http://") and not value.startswith("https://"):
-        value = "https://" + value
-
-    return value.rstrip("/")
-
-
-LIBRETRANSLATE_URLS = [
-    clean_url(url)
-    for url in os.getenv(
-        "LIBRETRANSLATE_URLS",
-        "https://translate.mentality.rip,"
-        "https://translate.cutie.dating,"
-        "https://translate.fedilab.app",
-    ).split(",")
-    if url.strip()
-]
 
 
 # Lingue che vogliamo mostrare.
@@ -93,13 +63,6 @@ DOUBLE_NEWLINE = NEWLINE * 2
 
 # Timeout massimo di una singola richiesta HTTP.
 TRANSLATION_TIMEOUT = 20
-
-# Tentativi totali per ogni traduzione:
-# uno per ogni istanza disponibile.
-MAX_TRANSLATION_ATTEMPTS = len(LIBRETRANSLATE_URLS)
-
-# Pausa tra un tentativo e l’altro, in secondi.
-RETRY_DELAY = 1
 
 # Quante traduzioni possono girare contemporaneamente.
 MAX_PARALLEL_TRANSLATIONS = 3
@@ -164,117 +127,7 @@ class TranslationRateLimitError(TranslationError):
 
 
 # --------------------------------------------------
-# CHIAMATA A LIBRETRANSLATE
-# --------------------------------------------------
-
-def libretranslate_request(
-    base_url,
-    text,
-    source,
-    target,
-):
-    """
-    Esegue una singola richiesta POST a LibreTranslate.
-    """
-
-    url = f"{base_url}/translate"
-
-    payload = {
-        "q": text,
-        "source": source,
-        "target": target,
-        "format": "text",
-    }
-
-    data = json.dumps(payload).encode("utf-8")
-
-    req = request.Request(
-        url,
-        data=data,
-        headers={
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-            "User-Agent": (
-                "AnimalPlanetOfficialTranslator/1.0"
-            ),
-        },
-        method="POST",
-    )
-
-    try:
-
-        with request.urlopen(
-            req,
-            timeout=TRANSLATION_TIMEOUT,
-        ) as response:
-
-            response_data = response.read()
-
-            result = json.loads(
-                response_data.decode("utf-8")
-            )
-
-            translated = result.get("translatedText")
-
-            if (
-                not isinstance(translated, str)
-                or not translated.strip()
-            ):
-
-                raise TranslationError(
-                    "Risposta senza testo tradotto."
-                )
-
-            return result
-
-    except error.HTTPError as exc:
-
-        try:
-            body = exc.read().decode(
-                "utf-8",
-                errors="replace",
-            )
-        except Exception:
-            body = ""
-
-        if exc.code in (429, 403, 503):
-
-            raise TranslationRateLimitError(
-                f"LibreTranslate ha rifiutato la richiesta "
-                f"HTTP {exc.code}. "
-                f"Risposta: {body}"
-            ) from exc
-
-        raise TranslationError(
-            f"LibreTranslate HTTP {exc.code}. "
-            f"Risposta: {body}"
-        ) from exc
-
-    except error.URLError as exc:
-
-        raise TranslationError(
-            f"Impossibile raggiungere LibreTranslate: {exc}"
-        ) from exc
-
-    except TimeoutError as exc:
-
-        raise TranslationError(
-            "Timeout durante la richiesta a LibreTranslate."
-        ) from exc
-
-    except json.JSONDecodeError as exc:
-
-        raise TranslationError(
-            "LibreTranslate ha restituito una risposta non valida."
-        ) from exc
-
-
-# --------------------------------------------------
-# SINGOLA TRADUZIONE CON FALLBACK
-# --------------------------------------------------
-
-# --------------------------------------------------
-# FALLBACK GRATUITO: MYMEMORY
+# TRADUZIONE CON MYMEMORY
 # --------------------------------------------------
 
 def mymemory_request(
@@ -283,11 +136,8 @@ def mymemory_request(
     target,
 ):
     """
-    Traduce usando MyMemory, senza API key.
+    Traduce un testo con MyMemory.
     """
-
-    if source == "auto":
-        source = "Autodetect"
 
     params = {
         "q": text,
@@ -299,7 +149,10 @@ def mymemory_request(
         for key, value in params.items()
     )
 
-    url = f"https://api.mymemory.translated.net/get?{query}"
+    url = (
+        "https://api.mymemory.translated.net/get?"
+        f"{query}"
+    )
 
     req = request.Request(
         url,
@@ -325,14 +178,34 @@ def mymemory_request(
 
     except error.HTTPError as exc:
 
-        raise TranslationRateLimitError(
-            f"MyMemory HTTP {exc.code}"
+        try:
+            body = exc.read().decode(
+                "utf-8",
+                errors="replace",
+            )
+        except Exception:
+            body = ""
+
+        if exc.code in (429, 403):
+
+            raise TranslationRateLimitError(
+                f"MyMemory HTTP {exc.code}. {body}"
+            ) from exc
+
+        raise TranslationError(
+            f"MyMemory HTTP {exc.code}. {body}"
         ) from exc
 
     except error.URLError as exc:
 
         raise TranslationError(
             f"MyMemory non raggiungibile: {exc}"
+        ) from exc
+
+    except TimeoutError as exc:
+
+        raise TranslationError(
+            "Timeout durante la richiesta a MyMemory."
         ) from exc
 
     except json.JSONDecodeError as exc:
@@ -352,10 +225,12 @@ def mymemory_request(
     ):
 
         raise TranslationError(
-            "MyMemory ha restituito una traduzione vuota."
+            f"MyMemory ha restituito una traduzione "
+            f"vuota verso '{target}'."
         )
 
     return translated
+
 
 async def translate_one(
     text,
@@ -363,153 +238,54 @@ async def translate_one(
     target,
 ):
     """
-    Prova prima LibreTranslate, poi MyMemory.
+    Traduce un testo verso una lingua con MyMemory.
     """
 
     started_at = time.monotonic()
 
-    last_error = None
-
-    # --------------------------------------------------
-    # 1) TENTATIVO LIBRETRANSLATE
-    # --------------------------------------------------
-
-    for attempt, base_url in enumerate(
-        LIBRETRANSLATE_URLS,
-        start=1,
-    ):
-
-        try:
-
-            logger.info(
-                "Traduzione verso %s tramite LibreTranslate: %s",
-                target,
-                base_url,
-            )
-
-            result = await asyncio.to_thread(
-                libretranslate_request,
-                base_url,
-                text,
-                source,
-                target,
-            )
-
-            translated = result.get("translatedText")
-
-            if (
-                isinstance(translated, str)
-                and translated.strip()
-            ):
-
-                logger.info(
-                    "Traduzione LibreTranslate riuscita. "
-                    "Target=%s Tempo=%.2f secondi.",
-                    target,
-                    time.monotonic() - started_at,
-                )
-
-                return translated
-
-            raise TranslationError(
-                "Traduzione vuota da LibreTranslate."
-            )
-
-        except (
-            TranslationError,
-            TranslationRateLimitError,
-        ) as exc:
-
-            last_error = exc
-
-            logger.warning(
-                "LibreTranslate fallita (%s) per %s: %s",
-                base_url,
-                target,
-                exc,
-            )
-
-            await asyncio.sleep(RETRY_DELAY)
-
-    # --------------------------------------------------
-    # 2) FALLBACK MYMEMORY
-    # --------------------------------------------------
-
-    try:
-
-        logger.info(
-            "Passo al fallback MyMemory per %s.",
-            target,
-        )
-
-        translated = await asyncio.to_thread(
-            mymemory_request,
-            text,
-            source,
-            target,
-        )
-
-        logger.info(
-            "Traduzione MyMemory riuscita. "
-            "Target=%s Tempo=%.2f secondi.",
-            target,
-            time.monotonic() - started_at,
-        )
-
-        return translated
-
-    except (
-        TranslationError,
-        TranslationRateLimitError,
-    ) as exc:
-
-        last_error = exc
-
-    raise TranslationError(
-        f"Tutti i servizi di traduzione hanno fallito "
-        f"per '{target}'. Ultimo errore: {last_error}"
+    translated = await asyncio.to_thread(
+        mymemory_request,
+        text,
+        source,
+        target,
     )
-
-
-# --------------------------------------------------
-# DIAGNOSTICA ALL’AVVIO
-# --------------------------------------------------
-
-async def libretranslate_diagnostic_test():
 
     logger.info(
-        "Avvio test diagnostico LibreTranslate..."
+        "Traduzione completata. "
+        "Source=%s Target=%s Tempo=%.2f secondi.",
+        source,
+        target,
+        time.monotonic() - started_at,
     )
 
-    started_at = time.monotonic()
+    return translated
+
+
+# --------------------------------------------------
+# RILEVAMENTO LINGUA LOCALE
+# --------------------------------------------------
+
+def detect_original_language(text):
 
     try:
 
-        translated = await translate_one(
-            "Ciao, questo è un test diagnostico.",
-            "auto",
-            "en",
-        )
-
-        elapsed = time.monotonic() - started_at
+        language = detect(text)
 
         logger.info(
-            "TEST LIBRETRANSLATE RIUSCITO. "
-            "Risultato=%r Tempo=%.2f secondi.",
-            translated,
-            elapsed,
+            "Lingua originale rilevata localmente: %s",
+            language,
         )
 
-    except Exception:
+        return language
 
-        elapsed = time.monotonic() - started_at
+    except LangDetectException:
 
-        logger.exception(
-            "TEST LIBRETRANSLATE FALLITO. "
-            "Istanze=%s Tempo=%.2f secondi.",
-            ", ".join(LIBRETRANSLATE_URLS),
-            elapsed,
+        logger.warning(
+            "Impossibile rilevare la lingua originale. "
+            "Uso l’italiano come fallback."
         )
+
+        return "it"
 
 
 # --------------------------------------------------
@@ -521,140 +297,27 @@ async def translate_all(text):
     async with translation_lock:
 
         logger.info(
-            "Avvio traduzione verso %s lingue.",
+            "Avvio traduzione verso %s lingue con MyMemory.",
             len(LANGUAGES),
         )
 
         started_at = time.monotonic()
 
-        # --------------------------------------------------
-        # PRIMA TRADUZIONE: rileva anche la lingua originale.
-        # --------------------------------------------------
-
-        first_result = None
-
-        last_error = None
-
-        for attempt, base_url in enumerate(
-            LIBRETRANSLATE_URLS,
-            start=1,
-        ):
-
-            try:
-
-                logger.info(
-                    "Rilevamento lingua e traduzione inglese. "
-                    "Tentativo %s/%s su %s.",
-                    attempt,
-                    MAX_TRANSLATION_ATTEMPTS,
-                    base_url,
-                )
-
-                first_result = await asyncio.to_thread(
-                    libretranslate_request,
-                    base_url,
-                    text,
-                    "auto",
-                    "en",
-                )
-
-                break
-
-            except (
-                TranslationError,
-                TranslationRateLimitError,
-            ) as exc:
-
-                last_error = exc
-
-                logger.warning(
-                    "Istanza %s fallita nella prima traduzione. "
-                    "Errore: %s",
-                    base_url,
-                    exc,
-                )
-
-                if attempt < MAX_TRANSLATION_ATTEMPTS:
-
-                    await asyncio.sleep(RETRY_DELAY)
-
-        if first_result is None:
-
-            raise TranslationError(
-                "Tutte le istanze hanno fallito "
-                "la prima traduzione. "
-                f"Ultimo errore: {last_error}"
-            )
-
-        english_translation = first_result.get(
-            "translatedText"
-        )
-
-        detected_info = first_result.get(
-            "detectedLanguage"
-        )
-
-        if (
-            not isinstance(english_translation, str)
-            or not english_translation.strip()
-        ):
-
-            raise TranslationError(
-                "LibreTranslate ha restituito "
-                "una traduzione inglese vuota."
-            )
-
-        # --------------------------------------------------
-        # LINGUA ORIGINALE
-        # --------------------------------------------------
-
-        original_language = None
-
-        if isinstance(detected_info, dict):
-
-            detected_language = detected_info.get(
-                "language"
-            )
-
-            if detected_language:
-
-                original_language = detected_language
-
-        logger.info(
-            "Lingua originale rilevata: %s.",
-            original_language or "sconosciuta",
+        original_language = detect_original_language(
+            text
         )
 
         translations = {}
 
-        if original_language == "en":
+        if original_language in LANGUAGES:
 
-            translations["en"] = text
-
-        else:
-
-            translations["en"] = english_translation
+            translations[original_language] = text
 
         remaining_languages = [
             language
             for language in LANGUAGES
-            if language != "en"
+            if language not in translations
         ]
-
-        if (
-            original_language
-            in remaining_languages
-        ):
-
-            translations[original_language] = text
-
-            remaining_languages.remove(
-                original_language
-            )
-
-        # --------------------------------------------------
-        # TRADUZIONI CONTROLLATE, MAX 3 PER VOLTA
-        # --------------------------------------------------
 
         async def translate_target(language):
 
@@ -667,7 +330,7 @@ async def translate_all(text):
 
                 translated = await translate_one(
                     text,
-                    original_language or "auto",
+                    original_language,
                     language,
                 )
 
@@ -1103,15 +766,31 @@ if __name__ == "__main__":
         "Avvio bot in polling. "
         "Flask sulla porta %s. "
         "Lingue=%s. "
-        "Istanze LibreTranslate=%s",
+        "Servizio=MyMemory",
         PORT,
         ",".join(LANGUAGES),
-        ", ".join(LIBRETRANSLATE_URLS),
     )
 
     async def post_init(application):
 
-        await libretranslate_diagnostic_test()
+        try:
+
+            translated = await translate_one(
+                "Ciao, questo è un test diagnostico.",
+                "it",
+                "en",
+            )
+
+            logger.info(
+                "TEST MYMEMORY RIUSCITO. Risultato=%r",
+                translated,
+            )
+
+        except Exception:
+
+            logger.exception(
+                "TEST MYMEMORY FALLITO."
+            )
 
     app.post_init = post_init
 
